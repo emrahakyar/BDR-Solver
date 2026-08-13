@@ -1,3 +1,4 @@
+import heapq
 import networkx as nx
 import matplotlib.pyplot as plt
 
@@ -39,12 +40,15 @@ class BDRSolver:
 
     def structural_check(self, X, Y):
         """
-        Phase 2: Preliminary O(1) filtering based on max degree bounds.
-        Corresponds to the first Gale-Ryser inequality (k=1).
+        Phase 2: O(1) partition-dependent degree filtering.
+
+        The candidate subsequences X and Y inherit the nonincreasing order
+        of self.d, so their maximum entries are X[0] and Y[0]. A simple
+        bipartite realization requires max(X) <= |Y| and max(Y) <= |X|.
         """
-        if not X or not Y: 
+        if not X or not Y:
             return False
-        return max(X) <= len(Y) and max(Y) <= len(X)
+        return X[0] <= len(Y) and Y[0] <= len(X)
 
     def gale_ryser_check(self, X, Y):
         """
@@ -57,12 +61,16 @@ class BDRSolver:
         if sum(X) != sum(Y):
             return False
             
-        # Compute conjugate sequence Y*
-        y_max = max(Y) if Y else 0
-        y_star = [0] * y_max
-        for val in Y:
-            for i in range(val):
-                y_star[i] += 1
+        # Compute the conjugate sequence Y* in linear time.
+        # Because Y is nonincreasing, a single moving boundary gives
+        # y_k^* = |{j : y_j >= k}| for k = 1, ..., y_1.
+        y_max = Y[0] if Y else 0
+        y_star = []
+        count = len(Y)
+        for k in range(1, y_max + 1):
+            while count > 0 and Y[count - 1] < k:
+                count -= 1
+            y_star.append(count)
         
         # Majorization check: Prefix sums of X <= Prefix sums of Y*
         prefix_sum_x = 0
@@ -111,7 +119,7 @@ class BDRSolver:
             return None
 
         needed = self.T - current_sum
-        # Constant time reachability check using precomputed bitsets
+        # Direct reachability bit test using the precomputed suffix bitset
         if not ((self.suffix_bitsets[idx] >> needed) & 1):
             return None
 
@@ -125,8 +133,10 @@ class BDRSolver:
 
     def construct_graph(self, X, Y):
         """
-        Phase 3: Explicit Graph Construction.
-        Implements the bipartite variant of the Havel-Hakimi algorithm.
+        Phase 3: Explicit graph construction using a max-priority queue.
+
+        Since Python's heapq is a min-heap, negative residual degrees are
+        stored so that the vertex of largest remaining degree is popped first.
         """
         G = nx.Graph()
         U_nodes = [f"u{i}" for i in range(len(X))]
@@ -134,28 +144,30 @@ class BDRSolver:
         G.add_nodes_from(U_nodes, bipartite=0)
         G.add_nodes_from(V_nodes, bipartite=1)
 
-        # Use a sorted list to simulate max-priority queue for partition V
-        v_pool = sorted([[Y[j], V_nodes[j]] for j in range(len(Y))], 
-                        key=lambda x: x[0], reverse=True)
+        # Max-heap on positive residual degrees in V.
+        heap = [(-Y[j], V_nodes[j]) for j in range(len(Y)) if Y[j] > 0]
+        heapq.heapify(heap)
 
-        # X is already sorted from Phase 1/Solver
         for i, deg_u in enumerate(X):
-            u_node = U_nodes[i]
-            
-            # Connect u_i to deg_u nodes in V with highest remaining degrees
-            to_connect = v_pool[:deg_u]
-            v_pool = v_pool[deg_u:]
-            
-            buffer = []
-            for deg_v, v_node in to_connect:
-                G.add_edge(u_node, v_node)
+            if deg_u > len(heap):
+                raise ValueError("Construction failed: insufficient positive residual degrees in V.")
+
+            selected = []
+            for _ in range(deg_u):
+                neg_deg_v, v_node = heapq.heappop(heap)
+                deg_v = -neg_deg_v
+                G.add_edge(U_nodes[i], v_node)
                 if deg_v - 1 > 0:
-                    buffer.append([deg_v - 1, v_node])
-            
-            # Re-insert and maintain sorting
-            v_pool.extend(buffer)
-            v_pool.sort(key=lambda x: x[0], reverse=True)
-            
+                    selected.append((-(deg_v - 1), v_node))
+
+            # Reinsert only after all neighbors of u_i have been selected,
+            # preventing multiple edges from u_i to the same vertex.
+            for item in selected:
+                heapq.heappush(heap, item)
+
+        if heap:
+            raise ValueError("Construction failed: positive residual degrees remain in V.")
+
         return G
 
 # --- Execution Example ---
